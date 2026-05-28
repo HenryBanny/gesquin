@@ -263,8 +263,11 @@
     <h2 id="page-title">Tableau de bord</h2>
     <div class="topbar-actions">
       <span style="font-size:12px;color:var(--text-muted);" id="current-date"></span>
+      <span id="gh-sync-status" style="font-size:11px;color:#8a96a3;padding:4px 10px;background:#f4f6f9;border:1px solid var(--border);border-radius:99px;white-space:nowrap;">💾 GitHub non configuré</span>
       <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:#1a3a5c;background:#fef3dc;border:1px solid #f0d080;padding:4px 12px;border-radius:99px;">👤 <span id="connected-user">—</span></span>
+      <button class="btn btn-outline btn-sm" onclick="openGhSettings()">⚙️ GitHub</button>
       <button class="btn btn-outline btn-sm" onclick="if(confirm('Se déconnecter ?')){location.reload();}">🔒 Déconnexion</button>
+      <button class="btn btn-outline btn-sm" style="color:var(--danger);border-color:var(--danger);" onclick="resetGhData()">🗑️ Réinit.</button>
     </div>
   </div>
 
@@ -1374,6 +1377,261 @@ let nextPfNum = 1, nextFaNum = 1, nextEntreeNum = 1;
 let currentInvoiceType = null;
 
 // =====================
+// PERSISTANCE LOCALSTORAGE
+// =====================
+const LS_KEY = 'comon_distri_data_v1';
+
+function saveData() {
+  try {
+    const data = {
+      products,
+      clients,
+      invoices,
+      entrees,
+      depots,
+      credits,
+      COMMERCIAUX,
+      nextPfNum,
+      nextFaNum,
+      nextEntreeNum,
+      nextRetraitNum,
+      nextCreditNum,
+      savedAt: new Date().toISOString()
+    };
+    localStorage.setItem(LS_KEY, JSON.stringify(data));
+  } catch(e) {
+    console.warn('Erreur sauvegarde localStorage:', e);
+  }
+}
+
+function loadData() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    if (data.products    && data.products.length)    products    = data.products;
+    if (data.clients     && data.clients.length)     clients     = data.clients;
+    if (data.invoices)   invoices    = data.invoices;
+    if (data.entrees)    entrees     = data.entrees;
+    if (data.depots)     depots      = data.depots;
+    if (data.credits)    credits     = data.credits;
+    if (data.COMMERCIAUX && data.COMMERCIAUX.length) COMMERCIAUX = data.COMMERCIAUX;
+    if (data.nextPfNum)      nextPfNum      = data.nextPfNum;
+    if (data.nextFaNum)      nextFaNum      = data.nextFaNum;
+    if (data.nextEntreeNum)  nextEntreeNum  = data.nextEntreeNum;
+    if (data.nextRetraitNum) nextRetraitNum = data.nextRetraitNum;
+    if (data.nextCreditNum)  nextCreditNum  = data.nextCreditNum;
+    console.log('✅ Données restaurées depuis localStorage (' + (data.savedAt||'?') + ')');
+    return true;
+  } catch(e) {
+    console.warn('Erreur chargement localStorage:', e);
+    return false;
+  }
+}
+
+// =====================
+// PERSISTANCE GITHUB
+// =====================
+const LS_CONFIG_KEY = 'comon_distri_github_config';
+const LS_CACHE_KEY  = 'comon_distri_cache_v1';
+
+let _ghConfig = null;   // { token, owner, repo, branch, filePath }
+let _ghFileSHA = null;  // SHA du fichier courant sur GitHub
+let _saveTimeout = null;
+let _syncStatus = 'idle'; // 'idle' | 'saving' | 'error' | 'ok'
+
+/* ---------- CONFIG ---------- */
+function loadGhConfig() {
+  try {
+    const raw = localStorage.getItem(LS_CONFIG_KEY);
+    if (raw) _ghConfig = JSON.parse(raw);
+  } catch(e) {}
+}
+
+function saveGhConfig(cfg) {
+  _ghConfig = cfg;
+  localStorage.setItem(LS_CONFIG_KEY, JSON.stringify(cfg));
+}
+
+function hasGhConfig() {
+  return _ghConfig && _ghConfig.token && _ghConfig.owner && _ghConfig.repo && _ghConfig.filePath;
+}
+
+/* ---------- INDICATEUR DE SYNC ---------- */
+function setSyncStatus(status, msg) {
+  _syncStatus = status;
+  const el = document.getElementById('gh-sync-status');
+  if (!el) return;
+  const icons = { idle:'💾', saving:'⏳', ok:'✅', error:'❌' };
+  const colors = { idle:'#8a96a3', saving:'#e8a020', ok:'#1a7a4a', error:'#c0392b' };
+  el.textContent = (icons[status]||'') + ' ' + (msg || '');
+  el.style.color = colors[status] || '#8a96a3';
+}
+
+/* ---------- LECTURE ---------- */
+async function loadData() {
+  loadGhConfig();
+
+  // Essayer d'abord GitHub
+  if (hasGhConfig()) {
+    try {
+      const url = `https://api.github.com/repos/${_ghConfig.owner}/${_ghConfig.repo}/contents/${_ghConfig.filePath}?ref=${_ghConfig.branch||'main'}&t=${Date.now()}`;
+      const resp = await fetch(url, {
+        headers: {
+          'Authorization': `token ${_ghConfig.token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      });
+      if (resp.ok) {
+        const meta = await resp.json();
+        _ghFileSHA = meta.sha;
+        const decoded = atob(meta.content.replace(/\n/g,''));
+        const data = JSON.parse(decoded);
+        _applyData(data);
+        // Mettre à jour le cache local
+        localStorage.setItem(LS_CACHE_KEY, JSON.stringify(data));
+        setSyncStatus('ok', 'Sync GitHub OK');
+        console.log('✅ Données chargées depuis GitHub');
+        return true;
+      } else {
+        console.warn('GitHub read error:', resp.status, await resp.text());
+      }
+    } catch(e) {
+      console.warn('Erreur GitHub load:', e);
+    }
+  }
+
+  // Fallback : cache localStorage
+  try {
+    const raw = localStorage.getItem(LS_CACHE_KEY);
+    if (raw) {
+      _applyData(JSON.parse(raw));
+      setSyncStatus('idle', 'Cache local');
+      console.log('⚠️ Données restaurées depuis le cache local');
+      return true;
+    }
+  } catch(e) {}
+
+  setSyncStatus('idle', hasGhConfig() ? 'Nouveau fichier' : 'GitHub non configuré');
+  return false;
+}
+
+function _applyData(data) {
+  if (data.products    && data.products.length)    products    = data.products;
+  if (data.clients     && data.clients.length)     clients     = data.clients;
+  if (data.invoices)   invoices    = data.invoices;
+  if (data.entrees)    entrees     = data.entrees;
+  if (data.depots)     depots      = data.depots;
+  if (data.credits)    credits     = data.credits;
+  if (data.COMMERCIAUX && data.COMMERCIAUX.length) COMMERCIAUX = data.COMMERCIAUX;
+  if (data.nextPfNum)      nextPfNum      = data.nextPfNum;
+  if (data.nextFaNum)      nextFaNum      = data.nextFaNum;
+  if (data.nextEntreeNum)  nextEntreeNum  = data.nextEntreeNum;
+  if (data.nextRetraitNum) nextRetraitNum = data.nextRetraitNum;
+  if (data.nextCreditNum)  nextCreditNum  = data.nextCreditNum;
+}
+
+/* ---------- SAUVEGARDE (debouncée 2s) ---------- */
+function saveData() {
+  const data = {
+    products, clients, invoices, entrees, depots, credits, COMMERCIAUX,
+    nextPfNum, nextFaNum, nextEntreeNum, nextRetraitNum, nextCreditNum,
+    savedAt: new Date().toISOString()
+  };
+  // Cache local immédiat
+  try { localStorage.setItem(LS_CACHE_KEY, JSON.stringify(data)); } catch(e) {}
+
+  // Push GitHub avec debounce 2s (évite les appels trop fréquents)
+  if (_saveTimeout) clearTimeout(_saveTimeout);
+  setSyncStatus('saving', 'Sauvegarde...');
+  _saveTimeout = setTimeout(() => _pushToGitHub(data), 2000);
+}
+
+async function _pushToGitHub(data) {
+  if (!hasGhConfig()) {
+    setSyncStatus('idle', 'GitHub non configuré');
+    return;
+  }
+  try {
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(data, null, 2))));
+    const url = `https://api.github.com/repos/${_ghConfig.owner}/${_ghConfig.repo}/contents/${_ghConfig.filePath}`;
+    const body = {
+      message: `[Auto] Sauvegarde données — ${new Date().toLocaleString('fr-FR')}`,
+      content,
+      branch: _ghConfig.branch || 'main'
+    };
+    if (_ghFileSHA) body.sha = _ghFileSHA;
+
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${_ghConfig.token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify(body)
+    });
+    if (resp.ok) {
+      const result = await resp.json();
+      _ghFileSHA = result.content.sha;
+      setSyncStatus('ok', 'Sauvegardé sur GitHub ✓');
+      setTimeout(() => setSyncStatus('ok', 'GitHub connecté'), 3000);
+    } else {
+      const err = await resp.json();
+      console.error('GitHub write error:', err);
+      setSyncStatus('error', 'Erreur GitHub: ' + (err.message||resp.status));
+    }
+  } catch(e) {
+    console.error('Erreur push GitHub:', e);
+    setSyncStatus('error', 'Erreur réseau');
+  }
+}
+
+/* ---------- MODAL CONFIG GITHUB ---------- */
+function openGhSettings() {
+  loadGhConfig();
+  if (_ghConfig) {
+    document.getElementById('gh-token').value    = _ghConfig.token    || '';
+    document.getElementById('gh-owner').value    = _ghConfig.owner    || '';
+    document.getElementById('gh-repo').value     = _ghConfig.repo     || '';
+    document.getElementById('gh-branch').value   = _ghConfig.branch   || 'main';
+    document.getElementById('gh-filepath').value = _ghConfig.filePath || 'data/comon_data.json';
+  }
+  document.getElementById('gh-settings-modal').classList.add('open');
+}
+
+function saveGhSettings() {
+  const cfg = {
+    token:    document.getElementById('gh-token').value.trim(),
+    owner:    document.getElementById('gh-owner').value.trim(),
+    repo:     document.getElementById('gh-repo').value.trim(),
+    branch:   document.getElementById('gh-branch').value.trim() || 'main',
+    filePath: document.getElementById('gh-filepath').value.trim() || 'data/comon_data.json'
+  };
+  if (!cfg.token || !cfg.owner || !cfg.repo) {
+    alert('Token, propriétaire et dépôt sont obligatoires.');
+    return;
+  }
+  saveGhConfig(cfg);
+  closeModal('gh-settings-modal');
+  setSyncStatus('saving', 'Test connexion...');
+  // Tester la connexion en rechargeant les données
+  loadData().then(() => {
+    renderDashboard();
+    renderStock();
+    renderClients();
+    renderEntreeHistory();
+  });
+}
+
+function resetGhData() {
+  if (!confirm('⚠️ Effacer TOUTES les données GitHub et le cache local ?\\nCette action est irréversible.')) return;
+  localStorage.removeItem(LS_CACHE_KEY);
+  _ghFileSHA = null;
+  location.reload();
+}
+
+// =====================
 // NAVIGATION
 // =====================
 const pageTitles = {
@@ -1838,6 +2096,7 @@ function deleteInvoice(idx) {
     }
   }
   invoices.splice(idx,1);
+  saveData();
   renderHistorique();
   renderDashboard();
 }
@@ -1847,6 +2106,7 @@ function deleteEntree(idx) {
   if(!e) return;
   if(!confirm(`Supprimer le bon de réception ${e.ref} ?\n\n⚠️ Le stock ne sera pas recalculé automatiquement.`)) return;
   entrees.splice(idx,1);
+  saveData();
   renderEntreeHistory();
   renderDashboard();
 }
@@ -1857,6 +2117,7 @@ function deleteDepotMouvement(depotIdx) {
   const label = d.type==='depot'?'dépôt':'retrait';
   if(!confirm(`Supprimer ce ${label} de ${fmtN(d.montant)} FCFA pour ${d.clientName} ?`)) return;
   depots.splice(depotIdx,1);
+  saveData();
   renderDepotTable();
   renderDepotStats();
   renderDashboard();
@@ -1874,6 +2135,7 @@ function deleteCredit(idx) {
     });
   }
   credits.splice(idx,1);
+  saveData();
   renderCreditTable();
   renderCreditStats();
   renderDashboard();
@@ -1891,6 +2153,7 @@ function deleteProduct(idx) {
   if(!p) return;
   if(!confirm(`Supprimer le produit "${p.name}" (${p.ref}) du catalogue ?\n\n⚠️ Action irréversible.`)) return;
   products.splice(idx,1);
+  saveData();
   renderStock();
   renderDashboard();
 }
@@ -1900,6 +2163,7 @@ function deleteAllDepots(cid) {
   const count = depots.filter(d=>d.clientId===cid).length;
   if(!confirm(`Supprimer tous les ${count} mouvement(s) de "${c?c.name:'ce client'}" ?\n\n⚠️ Action irréversible.`)) return;
   for(let i=depots.length-1;i>=0;i--){ if(depots[i].clientId===cid) depots.splice(i,1); }
+  saveData();
   renderDepotTable(); renderDepotStats(); renderDashboard();
 }
 
@@ -1910,6 +2174,7 @@ function deleteRemboursement(creditIdx, rembIdx) {
   if(!r) return;
   if(!confirm(`Supprimer ce remboursement de ${fmtN(r.montant)} FCFA (${dateStr(r.date)}) ?`)) return;
   cr.remboursements.splice(rembIdx,1);
+  saveData();
   closeModal('credit-detail-modal');
   viewCreditDetail(creditIdx);
   renderCreditTable(); renderCreditStats(); renderDashboard();
@@ -2017,6 +2282,7 @@ function saveEntree() {
 
   entrees.push({date, ref, fournisseur: four, lines: [...lines]});
   nextEntreeNum++;
+  saveData();
   alert(`✅ Entrée de stock "${ref}" validée !\n${lines.length} produit(s) mis à jour.`);
   clearEntree();
   renderEntreeHistory();
@@ -2187,6 +2453,7 @@ function saveInvoice(type) {
   };
   invoices.push(inv);
   if(type==='pf') nextPfNum++; else nextFaNum++;
+  saveData();
 
   alert(`✅ ${type==='pf'?'Facture proforma':'Facture définitive'} "${num}" enregistrée !\nTotal TTC: ${fmt(ttc)}`);
   previewInvoice(type, inv);
@@ -2600,6 +2867,7 @@ function convertProformaToFacture(idxOverride) {
   };
   invoices.push(fa);
   nextFaNum++;
+  saveData();
 
   // Fermer modal si ouverte
   closeModal('preview-modal');
@@ -2642,6 +2910,7 @@ function saveClient() {
   const name = document.getElementById('cl-name').value.trim();
   if(!name) { alert('Le nom est requis.'); return; }
   clients.push({id:Date.now(),name,tel:document.getElementById('cl-tel').value,email:document.getElementById('cl-email').value,addr:document.getElementById('cl-addr').value});
+  saveData();
   closeModal('client-modal');
   renderClients();
   renderClientSelects();
@@ -2736,6 +3005,7 @@ function saveDepot() {
   if(!montant || montant <= 0) { alert('Entrez un montant valide.'); return; }
   const c = clients.find(x => x.id === cid);
   depots.push({ id: Date.now(), clientId: cid, clientName: c.name, date, montant, note, type: 'depot', ref: '', lines: [] });
+  saveData();
   alert(`✅ Dépôt de ${fmt(montant)} enregistré pour ${c.name}\nNouveau solde : ${fmt(getClientSolde(cid))}`);
   document.getElementById('dep-montant').value = '';
   document.getElementById('dep-note').value = '';
@@ -2862,6 +3132,7 @@ function saveRetrait() {
   };
   invoices.push(fa);
   nextFaNum++;
+  saveData();
 
   alert(`✅ Retrait "${ref}" validé !\nFacture ${faNum} générée automatiquement.\nMontant : ${fmt(total)}\nNouveau solde dépôt : ${fmt(getClientSolde(cid))}`);
 
@@ -3098,6 +3369,7 @@ function saveCredit() {
   };
   invoices.push(fa);
   nextFaNum++;
+  saveData();
 
   alert(`✅ Crédit "${ref}" enregistré pour ${c.name}\nFacture ${faNum} générée automatiquement.\nMontant : ${fmt(ttc)}${echeance?'\nÉchéance : '+dateStr(echeance):''}`);
 
@@ -3159,6 +3431,7 @@ function saveRemboursement() {
     const du=getCreditResteDu(cr);const appliquer=Math.min(restant,du);
     cr.remboursements.push({date,montant:appliquer,mode});restant-=appliquer;
   }
+  saveData();
   const c=clients.find(x=>x.id===cid);
   alert(`✅ Remboursement de ${fmt(montant)} enregistré pour ${c.name}\nEncours restant : ${fmt(getCreditEncours(cid))}`);
   document.getElementById('remb-montant').value='';document.getElementById('remb-client').value='';
@@ -4007,6 +4280,7 @@ function npSave() {
   const newProduct = { ref, name, cat, unit, pack, stock, price, cost, desc };
   products.push(newProduct);
   _npRecentlyAdded.push(ref);
+  saveData();
 
   // Feedback visuel
   const marge = price - cost;
@@ -4141,6 +4415,7 @@ function saveProduct() {
     }
     // Ajouter nouveau produit
     products.push({ ref: ref.toUpperCase(), name, cat, unit, pack, stock, price, cost, desc });
+    saveData();
     alert(`✅ Produit "${name}" ajouté au catalogue !\nRéférence : ${ref.toUpperCase()}\nStock initial : ${stock} ${unit}\nPrix : ${fmt(price)}`);
   } else {
     // Modifier produit existant
@@ -4153,6 +4428,7 @@ function saveProduct() {
     p.price = price;
     p.cost  = cost;
     p.desc  = desc;
+    saveData();
     alert(`✅ Produit "${name}" modifié avec succès !`);
   }
 
@@ -4211,12 +4487,14 @@ function saveCommercial() {
   if(_editComId) {
     const c = COMMERCIAUX.find(x=>x.id===_editComId);
     if(c) { c.name=name; c.tel=tel; c.email=email; c.zone=zone; c.statut=statut; }
+    saveData();
     alert('Commercial mis a jour avec succes !');
   } else {
     if(COMMERCIAUX.some(c=>c.name.toLowerCase()===name.toLowerCase())) {
       alert('Un commercial nomme "'+name+'" existe deja.'); return;
     }
     COMMERCIAUX.push({id:Date.now(), name, tel, email, zone, statut});
+    saveData();
     alert('Commercial "'+name+'" ajoute avec succes !');
   }
   renderClientSelects();
@@ -4235,6 +4513,7 @@ function deleteCommercial(id) {
   if(!confirm(msg)) return;
   const idx = COMMERCIAUX.findIndex(x=>x.id===id);
   if(idx>=0) COMMERCIAUX.splice(idx,1);
+  saveData();
   renderClientSelects();
   renderCommerciaux();
   renderComStats();
@@ -4245,6 +4524,7 @@ function toggleComStatut(id) {
   const c = COMMERCIAUX.find(x=>x.id===id);
   if(!c) return;
   c.statut = c.statut==='actif' ? 'inactif' : 'actif';
+  saveData();
   renderClientSelects();
   renderCommerciaux();
   renderComStats();
@@ -4444,11 +4724,14 @@ function doLogin() {
 // =====================
 // INIT
 // =====================
-document.addEventListener('DOMContentLoaded', ()=>{
+document.addEventListener('DOMContentLoaded', async ()=>{
   document.getElementById('current-date').textContent = new Date().toLocaleDateString('fr-FR',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
   document.getElementById('entree-date').value = today();
+
+  // Charger les données depuis GitHub (ou cache local)
+  await loadData();
+
   renderEntreeHistory();
-  // Init dashboard with "year" period by default
   setDbPeriod('year');
   renderClientSelects();
   renderStock();
@@ -4539,6 +4822,53 @@ document.addEventListener('DOMContentLoaded', ()=>{
     <div style="display:flex;justify-content:flex-end;gap:8px;">
       <button class="btn btn-outline" onclick="closeModal('product-modal')">Annuler</button>
       <button class="btn btn-success" onclick="saveProduct()">✅ Enregistrer le produit</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CONFIGURATION GITHUB -->
+<div class="modal-overlay" id="gh-settings-modal">
+  <div class="modal" style="max-width:520px;">
+    <button class="modal-close" onclick="closeModal('gh-settings-modal')">✕</button>
+    <h3>⚙️ Connexion GitHub</h3>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6;">
+      Les données seront sauvegardées dans un fichier JSON de votre dépôt GitHub.<br>
+      <strong>Créez un Personal Access Token</strong> sur
+      <a href="https://github.com/settings/tokens/new" target="_blank" style="color:var(--primary-light);">github.com/settings/tokens</a>
+      avec la permission <code>repo</code>.
+    </p>
+    <div class="form-group" style="margin-bottom:14px;">
+      <label>🔑 Personal Access Token (PAT) <span style="color:var(--danger);">*</span></label>
+      <input type="password" id="gh-token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+    </div>
+    <div class="form-row col2" style="margin-bottom:14px;">
+      <div class="form-group">
+        <label>👤 Propriétaire du dépôt <span style="color:var(--danger);">*</span></label>
+        <input type="text" id="gh-owner" placeholder="votre-username">
+      </div>
+      <div class="form-group">
+        <label>📁 Nom du dépôt <span style="color:var(--danger);">*</span></label>
+        <input type="text" id="gh-repo" placeholder="nom-du-repo">
+      </div>
+    </div>
+    <div class="form-row col2" style="margin-bottom:18px;">
+      <div class="form-group">
+        <label>🌿 Branche</label>
+        <input type="text" id="gh-branch" placeholder="main" value="main">
+      </div>
+      <div class="form-group">
+        <label>📄 Chemin du fichier de données</label>
+        <input type="text" id="gh-filepath" placeholder="data/comon_data.json" value="data/comon_data.json">
+      </div>
+    </div>
+    <div style="background:#f4f6f9;border-radius:8px;padding:12px 14px;margin-bottom:18px;font-size:12px;color:var(--text-muted);line-height:1.7;">
+      <strong style="color:var(--primary);">💡 Comment ça fonctionne :</strong><br>
+      À chaque modification (facture, stock, client…), les données sont automatiquement sauvegardées dans votre dépôt GitHub sous forme de commit.
+      Au chargement, elles sont rechargées depuis GitHub — accessibles depuis n'importe quel appareil.
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;">
+      <button class="btn btn-outline" onclick="closeModal('gh-settings-modal')">Annuler</button>
+      <button class="btn btn-primary" onclick="saveGhSettings()">✅ Connecter & synchroniser</button>
     </div>
   </div>
 </div>
