@@ -737,16 +737,18 @@
       </div>
     </div>
 
-    <!-- ======= CLIENTS ======= -->
     <div id="page-clients" class="page">
       <div class="card">
         <div class="card-header">
           <span class="card-title">👥 Gestion des clients</span>
           <button class="btn btn-primary btn-sm" onclick="openClientModal()">+ Nouveau client</button>
         </div>
+        <div class="search-bar">
+          <input type="text" id="clients-search" placeholder="🔍 Rechercher nom, téléphone, email..." oninput="renderClients()">
+        </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Nom / Entreprise</th><th>Téléphone</th><th>Email</th><th>Adresse</th><th>Factures</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Nom / Entreprise</th><th>Téléphone</th><th>Email</th><th>Adresse</th><th>Factures</th><th>Solde dépôt</th><th>Actions</th></tr></thead>
             <tbody id="clients-tbody"></tbody>
           </table>
         </div>
@@ -1189,22 +1191,51 @@
 
 <!-- MODAL CLIENT -->
 <div class="modal-overlay" id="client-modal">
-  <div class="modal" style="max-width:480px;">
+  <div class="modal" style="max-width:520px;">
     <button class="modal-close" onclick="closeModal('client-modal')">✕</button>
-    <h3>Nouveau client</h3>
+    <h3 id="client-modal-title">Nouveau client</h3>
+
     <div class="form-row">
-      <div class="form-group"><label>Nom / Entreprise</label><input type="text" id="cl-name" placeholder="SARL Exemple"></div>
+      <div class="form-group">
+        <label>Nom / Entreprise <span style="color:var(--danger);">*</span></label>
+        <input type="text" id="cl-name" placeholder="SARL Exemple">
+      </div>
     </div>
     <div class="form-row col2">
-      <div class="form-group"><label>Téléphone</label><input type="text" id="cl-tel"></div>
-      <div class="form-group"><label>Email</label><input type="email" id="cl-email"></div>
+      <div class="form-group">
+        <label>Téléphone</label>
+        <input type="text" id="cl-tel" placeholder="+225 00 00 00 00">
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="cl-email" placeholder="email@exemple.com">
+      </div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label>Adresse</label><input type="text" id="cl-addr"></div>
+      <div class="form-group">
+        <label>Adresse</label>
+        <input type="text" id="cl-addr" placeholder="Quartier, Ville">
+      </div>
     </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
-      <button class="btn btn-outline" onclick="closeModal('client-modal')">Annuler</button>
-      <button class="btn btn-primary" onclick="saveClient()">Enregistrer</button>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Note / Informations complémentaires</label>
+        <textarea id="cl-note" placeholder="Conditions particulières, contacts secondaires..." style="height:60px;"></textarea>
+      </div>
+    </div>
+
+    <!-- Résumé factures (visible en mode édition) -->
+    <div id="cl-edit-info" style="display:none;padding:10px 14px;border-radius:8px;background:var(--bg);border:1px solid var(--border);margin-bottom:14px;">
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">Activité du client</div>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;" id="cl-edit-stats"></div>
+    </div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:14px;">
+      <div id="cl-edit-id" style="font-size:11px;color:var(--text-muted);"></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-outline" onclick="closeModal('client-modal')">Annuler</button>
+        <button class="btn btn-primary" id="cl-save-btn" onclick="saveClient()">✅ Enregistrer</button>
+      </div>
     </div>
   </div>
 </div>
@@ -2885,35 +2916,118 @@ function convertProformaToFacture(idxOverride) {
 // CLIENTS
 // =====================
 function renderClients() {
-  document.getElementById('clients-tbody').innerHTML = clients.map((c,i)=>{
+  const search = (document.getElementById('clients-search')||{}).value||'';
+  const filtered = clients.filter(c => !search || c.name.toLowerCase().includes(search.toLowerCase()) || (c.tel||'').includes(search) || (c.email||'').toLowerCase().includes(search.toLowerCase()));
+  document.getElementById('clients-tbody').innerHTML = filtered.map((c,i)=>{
+    const realIdx = clients.indexOf(c);
     const count = invoices.filter(inv=>inv.clientName===c.name).length;
+    const ca    = invoices.filter(inv=>inv.clientName===c.name&&inv.type==='definitif').reduce((s,inv)=>s+inv.ttc,0);
+    const solde = getClientSolde(c.id);
+    const encours = getCreditEncours(c.id);
     return `<tr>
-      <td style="font-weight:500;">${c.name}</td>
-      <td>${c.tel||'—'}</td>
-      <td style="color:var(--text-muted);">${c.email||'—'}</td>
-      <td>${c.addr||'—'}</td>
-      <td><span class="badge badge-blue">${count} facture(s)</span></td>
-      <td><button class="btn btn-outline btn-sm" onclick="deleteClient(${i})" style="color:var(--danger);">Suppr.</button></td>
+      <td>
+        <div style="font-weight:600;color:var(--primary);">${c.name}</div>
+        ${c.note?`<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${c.note.substring(0,50)}${c.note.length>50?'…':''}</div>`:''}
+      </td>
+      <td>${c.tel||'<span style="color:var(--text-muted);">—</span>'}</td>
+      <td style="color:var(--text-muted);font-size:12px;">${c.email||'—'}</td>
+      <td style="font-size:12px;">${c.addr||'—'}</td>
+      <td>
+        <span class="badge badge-blue">${count} fact.</span>
+        ${ca>0?`<div style="font-size:11px;color:var(--success);margin-top:2px;">${fmtN(ca)} FCFA</div>`:''}
+      </td>
+      <td>
+        <span style="font-size:12px;font-weight:600;color:${solde>=0?'var(--success)':'var(--danger)'};">${fmtN(solde)} FCFA</span>
+        ${encours>0?`<div style="font-size:11px;color:var(--danger);">Crédit: ${fmtN(encours)} FCFA</div>`:''}
+      </td>
+      <td style="white-space:nowrap;display:flex;gap:5px;">
+        <button class="btn btn-outline btn-sm" onclick="editClient(${realIdx})" title="Modifier">✏️ Modifier</button>
+        <button class="btn btn-sm" onclick="deleteClient(${realIdx})" style="background:var(--danger-light);color:var(--danger);border:1px solid var(--danger);" title="Supprimer">🗑️</button>
+      </td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);">Aucun client</td></tr>';
+  }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px;">Aucun client trouvé</td></tr>';
 }
 
+let _editClientIdx = null;
+
 function openClientModal() {
-  document.getElementById('cl-name').value='';
-  document.getElementById('cl-tel').value='';
-  document.getElementById('cl-email').value='';
-  document.getElementById('cl-addr').value='';
+  _editClientIdx = null;
+  document.getElementById('client-modal-title').textContent = 'Nouveau client';
+  document.getElementById('cl-save-btn').textContent = '✅ Enregistrer';
+  document.getElementById('cl-name').value  = '';
+  document.getElementById('cl-tel').value   = '';
+  document.getElementById('cl-email').value = '';
+  document.getElementById('cl-addr').value  = '';
+  document.getElementById('cl-note').value  = '';
+  document.getElementById('cl-edit-info').style.display = 'none';
+  document.getElementById('cl-edit-id').textContent = '';
   document.getElementById('client-modal').classList.add('open');
+  setTimeout(()=>document.getElementById('cl-name').focus(), 100);
+}
+
+function editClient(idx) {
+  const c = clients[idx];
+  if(!c) return;
+  _editClientIdx = idx;
+
+  document.getElementById('client-modal-title').textContent = '✏️ Modifier le client';
+  document.getElementById('cl-save-btn').textContent = '✅ Mettre à jour';
+  document.getElementById('cl-name').value  = c.name  || '';
+  document.getElementById('cl-tel').value   = c.tel   || '';
+  document.getElementById('cl-email').value = c.email || '';
+  document.getElementById('cl-addr').value  = c.addr  || '';
+  document.getElementById('cl-note').value  = c.note  || '';
+  document.getElementById('cl-edit-id').textContent = 'ID client : ' + c.id;
+
+  // Stats du client
+  const count   = invoices.filter(i=>i.clientName===c.name).length;
+  const ca      = invoices.filter(i=>i.clientName===c.name&&i.type==='definitif').reduce((s,i)=>s+i.ttc,0);
+  const solde   = getClientSolde(c.id);
+  const encours = getCreditEncours(c.id);
+  document.getElementById('cl-edit-stats').innerHTML = `
+    <div style="font-size:12px;"><span style="color:var(--text-muted);">Factures</span><br><strong>${count}</strong></div>
+    <div style="font-size:12px;"><span style="color:var(--text-muted);">CA total</span><br><strong style="color:var(--success);">${fmtN(ca)} FCFA</strong></div>
+    <div style="font-size:12px;"><span style="color:var(--text-muted);">Solde dépôt</span><br><strong style="color:${solde>=0?'var(--success)':'var(--danger)'};">${fmtN(solde)} FCFA</strong></div>
+    ${encours>0?`<div style="font-size:12px;"><span style="color:var(--text-muted);">Encours crédit</span><br><strong style="color:var(--danger);">${fmtN(encours)} FCFA</strong></div>`:''}
+  `;
+  document.getElementById('cl-edit-info').style.display = 'block';
+  document.getElementById('client-modal').classList.add('open');
+  setTimeout(()=>document.getElementById('cl-name').focus(), 100);
 }
 
 function saveClient() {
-  const name = document.getElementById('cl-name').value.trim();
-  if(!name) { alert('Le nom est requis.'); return; }
-  clients.push({id:Date.now(),name,tel:document.getElementById('cl-tel').value,email:document.getElementById('cl-email').value,addr:document.getElementById('cl-addr').value});
-  saveData();
-  closeModal('client-modal');
-  renderClients();
-  renderClientSelects();
+  const name  = document.getElementById('cl-name').value.trim();
+  const tel   = document.getElementById('cl-tel').value.trim();
+  const email = document.getElementById('cl-email').value.trim();
+  const addr  = document.getElementById('cl-addr').value.trim();
+  const note  = document.getElementById('cl-note').value.trim();
+
+  if(!name) { alert('Le nom du client est requis.'); document.getElementById('cl-name').focus(); return; }
+
+  if(_editClientIdx !== null) {
+    // Mode édition — mise à jour
+    const oldName = clients[_editClientIdx].name;
+    clients[_editClientIdx] = { ...clients[_editClientIdx], name, tel, email, addr, note };
+
+    // Mettre à jour le nom dans toutes les factures, dépôts et crédits si changé
+    if(oldName !== name) {
+      invoices.forEach(inv => { if(inv.clientName === oldName) inv.clientName = name; });
+      depots.forEach(d   => { if(d.clientName   === oldName) d.clientName   = name; });
+      credits.forEach(cr => { if(cr.clientName  === oldName) cr.clientName  = name; });
+    }
+    saveData();
+    closeModal('client-modal');
+    renderClients();
+    renderClientSelects();
+    alert(`✅ Client "${name}" mis à jour avec succès !`);
+  } else {
+    // Mode création
+    clients.push({ id: Date.now(), name, tel, email, addr, note });
+    saveData();
+    closeModal('client-modal');
+    renderClients();
+    renderClientSelects();
+  }
 }
 
 
